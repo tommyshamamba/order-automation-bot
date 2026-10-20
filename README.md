@@ -1,6 +1,6 @@
 # Order Automation Service
 
-[![CI](https://github.com/tommyshamamba/order-automation-bot/actions/workflows/ci.yml/badge.svg)](https://github.com/tommyshamamba/order-automation-bot/actions/workflows/ci.yml)
+[![CI](https://github.com/tommyshamamba/order-automation-service/actions/workflows/ci.yml/badge.svg)](https://github.com/tommyshamamba/order-automation-service/actions/workflows/ci.yml)
 
 A small FastAPI service that moves custom-print orders through a fixed fulfilment pipeline.
 Each stage change is recorded with a timestamp, and order creation is idempotent.
