@@ -1,48 +1,55 @@
-# order-automation-bot
+# Order Automation Service
 
-Automation of Sticker Mule internal workflow: Order creation → Proof generation (Image preview generator) → Production queue (Celery Redis) → Shipping simulation → Web dashboard.
+[![CI](https://github.com/tommyshamamba/order-automation-bot/actions/workflows/ci.yml/badge.svg)](https://github.com/tommyshamamba/order-automation-bot/actions/workflows/ci.yml)
 
-**Tommy Shamamba** — 9+ years (2017-2026) — **FLEXIBILITY true**.
+A small FastAPI service that moves custom-print orders through a fixed fulfilment pipeline.
+Each stage change is recorded with a timestamp, and order creation is idempotent.
 
-Proves Automation + Fast backend + E-commerce workflows + Internal bots.
+> Portfolio project. Storage is in memory and stage work is simulated with a configurable delay.
+> It is not a production system and claims no usage figures.
 
-## Stack
+## What it does
 
-Python Celery Redis PostgreSQL FastAPI Docker
+- `POST /orders` validates the request (customer, design URL, quantity 1–100,000) and creates an order.
+  A repeated `Idempotency-Key` header returns the original order instead of creating a duplicate.
+- A background task advances the order: `created → proof_generation → production_queue → shipping → done`.
+- `GET /orders/{id}` returns the current stage and full transition history. `GET /orders` lists all orders.
+- `GET /stats` counts orders per stage. `GET /healthz` is the liveness check.
 
-## Metrics
+## Architecture
 
-- 7M+ users
-- 5M events/day
-- 99.99% uptime
-- latency -35% p95 120->72ms Redis caching Postgres query tuning
-- MTTR -45% Datadog
-- sync -40%
-- FLEXIBILITY true
+```
+client ─► FastAPI router ─► OrderStore (thread-safe dict + idempotency index)
+                │
+                └─► BackgroundTasks: run_pipeline() advances stages with STAGE_DELAY_SECONDS between them
+```
+
+The store and the pipeline runner are separate, so a database repository or a real queue
+(for example Celery on Redis) could replace them without changing the API.
 
 ## Run
 
-```bash
-pip install fastapi uvicorn celery redis
-uvicorn src.main:app --host 0.0.0.0 --port 8002
+```sh
+pip install -r requirements.txt
+uvicorn src.main:app --reload            # http://localhost:8000/docs
+# or
+docker compose up --build
 ```
 
-Health: http://localhost:8002/health  
-Dashboard: http://localhost:8002/dashboard  
-Docs: http://localhost:8002/docs
+| Variable | Default | Meaning |
+| --- | --- | --- |
+| `STAGE_DELAY_SECONDS` | `0.5` | Simulated work time per stage |
 
-## Push commands
+## Tests
 
-```bash
-git init
-git add .
-git commit -m "Order Automation Bot Senior 9+ years FLEXIBILITY Python Celery Redis Postgres FastAPI"
-git branch -M main
-git remote add origin https://github.com/tommyshamamba/order-automation-bot.git
-git push -u origin main
+```sh
+pip install -r requirements.txt -r requirements-dev.txt
+ruff check . && pytest -q
 ```
 
-## Contact
+The tests cover the full pipeline, idempotency, input validation, 404 handling and stage counts.
+GitHub Actions runs lint, tests and a Docker build on every push.
 
-shamambatommy@gmail.com | 817-448-4871 | Fort Worth TX CST  
-github.com/tommyshamamba | linkedin.com/in/tommy-shamamba-412954208
+## License
+
+MIT

@@ -1,136 +1,147 @@
-"""
-Order Automation Bot — Sticker Mule internal workflow clone.
+"""Order automation service.
 
-Tommy Shamamba — 9+ years (2017-2026) — FLEXIBILITY true.
-7M+ users, 5M/day, 99.99%, latency -35% p95 120->72ms Redis caching Postgres query tuning,
-MTTR -45% Datadog, sync -40%, Notify/Reply 99.99% retries DLQ near-zero loss,
-inference -40%/-30% Go wrapper llama.cpp ggml quantization multi-GPU C++ CUDA,
-CV 1M+ images/day FastAPI TF PyTorch OpenCV ClickHouse GPU queue SQS DLQ.
+A FastAPI service that moves custom-print orders through a fixed pipeline:
+created -> proof_generation -> production_queue -> shipping -> done.
+Each order records a timestamped history of its stage transitions. Order creation
+is idempotent when the client sends an ``Idempotency-Key`` header.
 
-Celery worker comment:
-celery -A main.celery_app worker --loglevel=info broker redis://localhost:6379/0
+Storage is in memory and stage work is simulated with configurable delays, so the
+service runs with no external dependencies.
 """
 
 from __future__ import annotations
 
+import os
+import threading
 import time
 import uuid
+from datetime import datetime, timezone
 from enum import Enum
-from typing import Any
 
-from fastapi import BackgroundTasks, FastAPI, HTTPException
-from pydantic import BaseModel, Field
-
-app = FastAPI(
-    title="Order Automation Bot — 9+ years FLEXIBILITY",
-    description="Proof gen + Production queue + Shipping sim — 7M+ users 5M/day 99.99%",
-)
+from fastapi import BackgroundTasks, FastAPI, Header, HTTPException
+from pydantic import BaseModel, Field, HttpUrl
 
 
-class OrderStatus(str, Enum):
+class Stage(str, Enum):
     created = "created"
     proof_generation = "proof_generation"
     production_queue = "production_queue"
-    shipping_simulation = "shipping_simulation"
+    shipping = "shipping"
     done = "done"
+
+
+PIPELINE: list[Stage] = [
+    Stage.proof_generation,
+    Stage.production_queue,
+    Stage.shipping,
+    Stage.done,
+]
+
+
+def stage_delay_seconds() -> float:
+    """Simulated work per stage; set STAGE_DELAY_SECONDS=0 in tests."""
+    return float(os.getenv("STAGE_DELAY_SECONDS", "0.5"))
+
+
+class Transition(BaseModel):
+    stage: Stage
+    at: datetime
 
 
 class Order(BaseModel):
     id: str
     customer: str
-    design_url: str
-    quantity: int = 100
-    status: OrderStatus = OrderStatus.created
-    flexibility: bool = True
+    design_url: HttpUrl
+    quantity: int
+    stage: Stage = Stage.created
+    history: list[Transition] = Field(default_factory=list)
 
 
-class CreateOrderRequest(BaseModel):
-    customer: str = "Tommy Shamamba"
-    design_url: str = "https://cdn.example.com/design.png"
-    quantity: int = Field(default=100, ge=1)
+class CreateOrder(BaseModel):
+    customer: str = Field(min_length=1, max_length=200)
+    design_url: HttpUrl
+    quantity: int = Field(ge=1, le=100_000)
 
 
-# orders_db dict (production Postgres schema design indexing query tuning -35%)
-orders_db: dict[str, Order] = {}
+class OrderStore:
+    """Thread-safe in-memory store with idempotency-key lookup."""
+
+    def __init__(self) -> None:
+        self._orders: dict[str, Order] = {}
+        self._by_key: dict[str, str] = {}
+        self._lock = threading.Lock()
+
+    def create(self, req: CreateOrder, key: str | None) -> tuple[Order, bool]:
+        with self._lock:
+            if key and key in self._by_key:
+                return self._orders[self._by_key[key]], False
+            order = Order(id=str(uuid.uuid4()), customer=req.customer,
+                          design_url=req.design_url, quantity=req.quantity)
+            order.history.append(Transition(stage=Stage.created, at=_now()))
+            self._orders[order.id] = order
+            if key:
+                self._by_key[key] = order.id
+            return order, True
+
+    def get(self, order_id: str) -> Order | None:
+        with self._lock:
+            return self._orders.get(order_id)
+
+    def all(self) -> list[Order]:
+        with self._lock:
+            return list(self._orders.values())
+
+    def advance(self, order_id: str, stage: Stage) -> None:
+        with self._lock:
+            order = self._orders[order_id]
+            order.stage = stage
+            order.history.append(Transition(stage=stage, at=_now()))
 
 
-def process_order_pipeline(order_id: str) -> None:
-    order = orders_db.get(order_id)
-    if order is None:
-        return
-
-    order.status = OrderStatus.proof_generation
-    time.sleep(1)  # proof gen image preview generator
-
-    order.status = OrderStatus.production_queue
-    time.sleep(1)  # production queue Celery Redis SQS DLQ dynamic scaling -40% errors
-
-    order.status = OrderStatus.shipping_simulation
-    time.sleep(0.5)  # shipping sim e-commerce workflows
-
-    order.status = OrderStatus.done  # 99.99% uptime FLEXIBILITY
-    orders_db[order_id] = order
+def _now() -> datetime:
+    return datetime.now(timezone.utc)
 
 
-@app.get("/health")
-def health() -> dict[str, Any]:
-    return {
-        "status": "ok",
-        "service": "order-automation-bot",
-        "uptime": "99.99%",
-        "users": "7M+",
-        "events": "5M/day",
-        "latency_p95": "72ms",
-        "latency_reduction": "-35%",
-        "mttr_reduction": "-45%",
-        "flexibility": True,
-        "years": "9+",
-        "stack": "Python Celery Redis Postgres FastAPI Docker",
-        "features": ["Proof gen", "Production queue", "Shipping"],
-        "engineer": "Tommy Shamamba",
-    }
+store = OrderStore()
+app = FastAPI(title="Order automation service", version="1.0.0")
 
 
-@app.post("/api/orders")
-def create_order(payload: CreateOrderRequest, background_tasks: BackgroundTasks) -> Order:
-    order = Order(
-        id=str(uuid.uuid4()),
-        customer=payload.customer,
-        design_url=payload.design_url,
-        quantity=payload.quantity,
-        status=OrderStatus.created,
-        flexibility=True,
-    )
-    orders_db[order.id] = order
-    background_tasks.add_task(process_order_pipeline, order.id)
+def run_pipeline(order_id: str) -> None:
+    for stage in PIPELINE:
+        time.sleep(stage_delay_seconds())
+        store.advance(order_id, stage)
+
+
+@app.get("/healthz")
+def healthz() -> dict[str, str]:
+    return {"status": "ok"}
+
+
+@app.post("/orders", status_code=201)
+def create_order(req: CreateOrder, background: BackgroundTasks,
+                 idempotency_key: str | None = Header(default=None)) -> Order:
+    order, created = store.create(req, idempotency_key)
+    if created:
+        background.add_task(run_pipeline, order.id)
     return order
 
 
-@app.get("/api/orders/{order_id}")
+@app.get("/orders/{order_id}")
 def get_order(order_id: str) -> Order:
-    order = orders_db.get(order_id)
+    order = store.get(order_id)
     if order is None:
         raise HTTPException(status_code=404, detail="order not found")
     return order
 
 
-@app.get("/api/orders")
+@app.get("/orders")
 def list_orders() -> list[Order]:
-    return list(orders_db.values())
+    return store.all()
 
 
-@app.get("/dashboard")
-def dashboard() -> dict[str, Any]:
-    by_status: dict[str, int] = {status.value: 0 for status in OrderStatus}
-    for order in orders_db.values():
-        by_status[order.status.value] += 1
-    return {
-        "by_status": by_status,
-        "total_orders": len(orders_db),
-        "flexibility": True,
-        "years": "9+",
-        "automation": "Proof gen + Production queue + Shipping sim",
-        "pattern": "1M+ images/day",
-        "engineer": "Tommy Shamamba",
-        "uptime": "99.99%",
-    }
+@app.get("/stats")
+def stats() -> dict[str, int]:
+    counts = {s.value: 0 for s in Stage}
+    for order in store.all():
+        counts[order.stage.value] += 1
+    return counts

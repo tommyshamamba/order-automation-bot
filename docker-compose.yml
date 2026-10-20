@@ -1,27 +1,7 @@
-# FLEXIBILITY=true YEARS=9+ (2017-2026)
 services:
-  postgres:
-    image: postgres:15
-    environment:
-      POSTGRES_USER: sticker
-      POSTGRES_PASSWORD: mule
-      POSTGRES_DB: orders
-      FLEXIBILITY: "true"
-    ports:
-      - "5433:5432"
-
-  redis:
-    image: redis:7
-    ports:
-      - "6380:6379"
-
   api:
     build: .
     ports:
-      - "8002:8002"
+      - "8000:8000"
     environment:
-      FLEXIBILITY: "true"
-      YEARS: "9+ (2017-2026)"
-    depends_on:
-      - postgres
-      - redis
+      STAGE_DELAY_SECONDS: "0.5"
